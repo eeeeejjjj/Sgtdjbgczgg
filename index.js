@@ -8,11 +8,6 @@ const { MongoClient, ServerApiVersion } = require('mongodb');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
 // --- DANGER: HARDCODED CREDENTIALS START ---
 // WARNING: This exposes your sensitive information directly in your codebase.
 // This is NOT recommended for any real-world application or public repository.
@@ -26,6 +21,33 @@ const GMAIL_APP_PASSWORD = 'oybz rjks tfqf mvom'; // This is a Google App Passwo
 
 // --- DANGER: HARDCODED CREDENTIALS END ---
 
+
+// --- Global Error Handling for Robustness ---
+// Catches unhandled promise rejections (async errors not caught by try...catch)
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    // Application specific logging, cleanup, or exit.
+    // In a production app, you might use a dedicated error monitoring tool.
+    // For this example, we'll log and let the process continue for now,
+    // but a robust app might choose to exit and rely on process manager to restart.
+});
+
+// Catches uncaught exceptions (synchronous errors not caught by try...catch)
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // Perform synchronous cleanup if necessary, then exit.
+    // Process should exit after uncaught exception to avoid inconsistent state.
+    process.exit(1);
+});
+
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+
+// --- MongoDB Connection Setup ---
 const client = new MongoClient(MONGODB_URI, {
     serverApi: {
         version: ServerApiVersion.v1,
@@ -38,9 +60,10 @@ let usersCollection; // To store a reference to the users collection
 
 async function connectToMongoDB() {
     try {
+        console.log('Attempting to connect to MongoDB...');
         await client.connect();
         await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. Successfully connected to MongoDB!");
+        console.log("Successfully connected to MongoDB Atlas!");
 
         const db = client.db('auth_db'); // Use your desired database name
         usersCollection = db.collection('users'); // Use your desired collection name
@@ -50,7 +73,8 @@ async function connectToMongoDB() {
         console.log("MongoDB 'users' collection ready with unique email index.");
 
     } catch (error) {
-        console.error('Failed to connect to MongoDB or initialize collection:', error);
+        console.error('CRITICAL ERROR: Failed to connect to MongoDB or initialize collection:', error);
+        console.error('Server cannot start without database connection. Exiting process.');
         process.exit(1); // Exit if database connection fails
     }
 }
@@ -64,7 +88,12 @@ const transporter = nodemailer.createTransport({
     auth: {
         user: GMAIL_USER,
         pass: GMAIL_APP_PASSWORD
-    }
+    },
+    // Optional: Add a timeout for email sending to prevent hanging
+    // This timeout is for the connection to the SMTP server, not the email being delivered.
+    connectionTimeout: 15000, // 15 seconds
+    greetingTimeout: 10000,   // 10 seconds
+    socketTimeout: 30000      // 30 seconds
 });
 
 // Function to generate a secure 6-digit alphanumeric OTP
@@ -98,7 +127,7 @@ app.post('/request-otp', async (req, res) => {
                 <h3 style="background-color: #f2f2f2; padding: 10px; border-radius: 5px; text-align: center; font-size: 24px; letter-spacing: 2px;">
                     <strong>${otp}</strong>
                 </h3>
-                <p>This OTP is valid for a single use and for a limited time (20 seconds).</p>
+                <p>This OTP is valid for a single use and for a limited time (1 minute).</p>
                 <p>If you did not request this OTP, please ignore this email.</p>
                 <hr style="border: 0; border-top: 1px solid #eee;">
                 <p style="font-size: 0.9em; color: #777;">Thank you,<br>Your Authentication System</p>
@@ -107,6 +136,7 @@ app.post('/request-otp', async (req, res) => {
     };
 
     try {
+        console.log(`Sending OTP to ${email}...`);
         await transporter.sendMail(mailOptions);
         console.log('OTP email sent successfully to', email);
 
@@ -139,7 +169,7 @@ app.post('/request-otp', async (req, res) => {
                         <p>A 6-digit OTP has been sent to <strong>${email}</strong>. Please enter it below:</p>
                         <input type="text" id="otpInput" placeholder="Enter 6-digit OTP" maxlength="6" autocomplete="off">
                         <button id="verifyOtpBtn">Verify OTP</button>
-                        <div id="messageDisplay" class="message info">OTP expires in <span id="countdown">20</span> seconds.</div>
+                        <div id="messageDisplay" class="message info">OTP expires in <span id="countdown">60</span> seconds.</div>
                     </div>
                 </div>
 
@@ -156,7 +186,7 @@ app.post('/request-otp', async (req, res) => {
                     const countdownSpan = document.getElementById('countdown');
 
                     otpInput.focus();
-                    let timeLeft = 20;
+                    let timeLeft = 60; // Increased to 1 minute
                     let countdownInterval;
 
                     function startCountdown() {
@@ -196,7 +226,7 @@ app.post('/request-otp', async (req, res) => {
                             const tempPasswordHash = localStorage.getItem('tempPasswordHash');
 
                             try {
-                                const response = await fetch('/register-and-verify', {
+                                const response = await fetch('https://sgtdjbgczgg.onrender.com/register-and-verify', { // Ensure this URL matches your deployed server
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ email: tempEmail, username: tempUsername, passwordHash: tempPasswordHash })
@@ -256,6 +286,7 @@ app.post('/register-and-verify', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Email, username, and hashed password are required for registration.' });
     }
     if (!usersCollection) {
+        console.error('usersCollection is not initialized in /register-and-verify');
         return res.status(500).json({ success: false, message: 'Database not initialized.' });
     }
     try {
@@ -287,6 +318,7 @@ app.post('/login', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Email and password are required.' });
     }
     if (!usersCollection) {
+        console.error('usersCollection is not initialized in /login');
         return res.status(500).json({ success: false, message: 'Database not initialized.' });
     }
     try {
@@ -307,7 +339,10 @@ app.post('/login', async (req, res) => {
 
 // Endpoint 4: GET /users
 app.get('/users', async (req, res) => {
-    if (!usersCollection) { return res.status(500).json({ success: false, message: 'Database not initialized.' }); }
+    if (!usersCollection) {
+        console.error('usersCollection is not initialized in /users');
+        return res.status(500).json({ success: false, message: 'Database not initialized.' });
+    }
     try {
         const users = await usersCollection.find({}, { projection: { passwordHash: 0 } }).toArray();
         const formattedUsers = users.map(user => ({
@@ -327,7 +362,10 @@ app.get('/users', async (req, res) => {
 app.delete('/users/:email', async (req, res) => {
     const { email } = req.params;
     if (!email) { return res.status(400).json({ success: false, message: 'Email parameter is required for deletion.' }); }
-    if (!usersCollection) { return res.status(500).json({ success: false, message: 'Database not initialized.' }); }
+    if (!usersCollection) {
+        console.error('usersCollection is not initialized in /users/:email (DELETE)');
+        return res.status(500).json({ success: false, message: 'Database not initialized.' });
+    }
     try {
         const result = await usersCollection.deleteOne({ email: email });
         if (result.deletedCount === 0) { return res.status(404).json({ success: false, message: 'User with this email not found.' }); }
@@ -344,8 +382,20 @@ app.listen(PORT, () => {
     console.log(`Access the application at http://localhost:${PORT}`);
 });
 
+// Graceful shutdown
 process.on('SIGINT', async () => {
-    console.log('Server shutting down. Closing MongoDB connection.');
-    await client.close();
+    console.log('Server received SIGINT. Shutting down gracefully.');
+    if (client) {
+        await client.close();
+        console.log('MongoDB connection closed.');
+    }
+    process.exit(0);
+});
+process.on('SIGTERM', async () => {
+    console.log('Server received SIGTERM. Shutting down gracefully.');
+    if (client) {
+        await client.close();
+        console.log('MongoDB connection closed.');
+    }
     process.exit(0);
 });
